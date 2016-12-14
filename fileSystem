@@ -1,0 +1,1165 @@
+#include<stdio.h>
+#include<fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdint.h>
+#define max_size 200
+#include <string.h>
+#include <stdbool.h>
+#define initfs 1
+#define cpin 2
+/*Global Variabl*/
+char* word[100];
+char* word_slash[100];
+int fd;
+char *g_argv;
+int size;
+int numOfBlocksNeeded;
+
+int abs_path_dir;
+/* Function to split the string with spaces */
+	void  split_string(char *newstring)
+        {
+	   int i=0;
+	   char *token;
+	   token = strtok(newstring," ");
+	  	 while(token!=NULL)
+		 {
+	   		word[i]=token;
+	    		token=strtok(NULL," ");
+		 	i++;
+		  }
+	 }
+
+/*Function to split the absoulte path with forwad slashes */
+	void  split_string_fSlash(char *newstring)
+        {
+	   abs_path_dir=0;
+	   int i=0;
+	   char *token;
+	   token = strtok(newstring,"/");
+	  	 while(token!=NULL)
+		 {
+	   		word_slash[i]=token;
+	    		token=strtok(NULL,"/");
+		 	i++;
+			abs_path_dir++;
+			
+		  }
+	 }
+
+		
+		
+	int TotalBlocks;
+	int TotalInodes;
+
+// Total number of blocks : fsize
+	int getNumOfBlocks(void){
+		int NumOfBlocks = TotalBlocks;
+		return NumOfBlocks;
+		}
+
+// Total number of Inodes
+	int getNumOfInodes(void){
+		int NumOfInodes = TotalInodes;
+		return NumOfInodes;
+		}
+// Total number of Inode blocks
+	int getInodesBlocks(void){
+		int NumOfInodes = getNumOfInodes();
+		int NumInodesBlocks = NumOfInodes/16;
+		return NumInodesBlocks;
+		}
+
+// Total number of free blocks
+	int getFreeBlocks(void){
+		int NumOfFreeBlocks = (getNumOfBlocks() - (getInodesBlocks() + 2));
+		return NumOfFreeBlocks;
+		}
+
+	/*
+	    Calculates the starting index for free data blocks.'1' is added to point to the starting position
+	     of data blocks
+	     return: freeBlockIndex Starting index where the free data blocks star */
+
+	int getFreeBlocksIndex(void){
+		int freeBlockIndex;
+		freeBlockIndex = getNumOfBlocks() - getFreeBlocks() + 1;
+		return freeBlockIndex;
+		}
+//Super Block
+	
+	typedef struct Super {
+		unsigned short fsize;
+		unsigned short isize;
+		unsigned short nfree;
+		unsigned short free[100];
+		unsigned short ninode;
+		unsigned short inode[100];
+		char flock;
+		char ilock;
+		char fmod;
+		unsigned short time[2];
+		} sup;
+		
+	sup super_block = {0,0,0,{0},0,{0},0,0,0,{0}};
+
+//Inode
+	typedef struct Inode {
+	         unsigned short flags;
+		 char nlinks;
+		 char uid;
+		 char gid;
+		 char size0;
+		 unsigned short size1;
+		 unsigned short addr[8];
+		 unsigned short actime[2];
+		 unsigned short modtime[2];
+		 }inode;
+
+	inode node = {0,0,0,0,0,0,{0},{0},{0}}; 
+
+// initialze the inode
+
+	void initialize_inode(){
+		
+		char buffer_initialize[32] = {0};
+		int i;
+			int inode_blocks = atoi(word[2]);
+			for(i=0;i<inode_blocks;i++){
+				lseek(fd, 1024 + i * 32, 0);
+				write(fd, buffer_initialize, sizeof(struct Inode));
+			}
+	}
+	
+	
+
+	char entryName[500][14];
+	int inodeList[] = {0};
+	int inodeCounter=0;
+
+// Storing the file names and their corresponding inode number in the list
+	void file_entry(char *entry, int node){
+		strcpy(entryName[inodeCounter],entry);
+		inodeList[inodeCounter] = node;
+		inodeCounter++;
+		}
+
+// Next free Inode
+	int getNextFreeInode(void){
+		int freeInode = 0;
+		if(inodeCounter == getNumOfInodes()){
+			freeInode = -1;
+		}
+		else freeInode = inodeCounter;
+		return freeInode;
+	}
+
+// Directory Structure
+	typedef struct Directory{
+		unsigned short inodeNumber;
+		char fileName[14];
+		} directory;
+
+// file descriptor initialization
+	void init_fd(){	
+	
+		fd = open(g_argv,O_RDWR | O_CREAT,0777);
+	}
+
+	
+	/*  Finds a free block to be allocated for the new directory entry. return free block */
+	int getNextFreeBlock(void){
+		
+		int freeBlock,freeChainBlock;
+			unsigned short freeHeadChain;
+
+		sup freeBlock_SB;
+				
+		
+		lseek(fd,512,0);
+		read(fd,&freeBlock_SB, sizeof(struct Super));
+
+		if(freeBlock_SB.nfree == 1){
+			
+			freeChainBlock = freeBlock_SB.free[--freeBlock_SB.nfree];
+			
+			//head of the chain points to the next headi
+			lseek(fd,freeChainBlock*512,0);
+			read(fd,&freeHeadChain,2);
+
+			//reser nfree to 100
+			freeBlock_SB.nfree = 100;
+			
+			//copy the free array to the new list
+			int i;
+			for (i=0;i<100;i++){
+				freeBlock_SB.free[i] = freeHeadChain + i;
+			}
+
+			//if nfree is not 1
+			freeBlock = (int)freeBlock_SB.free[--freeBlock_SB.nfree];
+
+			//changing super block after head chain has changed
+			lseek(fd,512,0);
+			write(fd,&freeBlock_SB,sizeof(struct Super));
+
+		}else{
+			
+			freeBlock = (int)freeBlock_SB.free[--freeBlock_SB.nfree];
+			//writing after the free block has been allocated
+			
+			lseek(fd,512,0);
+			write(fd,&freeBlock_SB,sizeof(struct Super));
+
+			}
+
+	return freeBlock;	
+	
+	}
+
+	// search the absoulte path of directory  in file system to check if directory  is present
+
+	bool searchDirectory_abs_path_cpin(){
+		bool found = false;
+		
+		int i,j,k,m;
+		int count =0;
+		char *word_1 = word[2];
+		split_string_fSlash(word_1);
+		if(abs_path_dir == 1){
+			char *LastDirPath = word_slash[abs_path_dir-2];
+			for(k=0;k<=inodeCounter;k++){
+				if(strcmp(LastDirPath,entryName[k]) == 0){
+					printf("File with name %s is already present\n",LastDirPath);
+					found = true;
+					return found;
+				}
+			}
+		}
+
+		else{
+			
+			char *LastDirPath = word_slash[abs_path_dir-1];
+			for(j=1;j<abs_path_dir-1;j++){
+					
+				char *dirName = word_slash[j-1];
+					
+				for(i=0;i<=inodeCounter;i++){
+					if(strcmp(dirName,entryName[i]) == 0){
+							count = count + 1;
+							break;
+					}
+				}
+				if(count == abs_path_dir-2){
+							printf("Parent directories are present\n");
+							found = true;
+							break;
+					}
+			}
+				
+		          
+			
+						if(i > inodeCounter ){
+							found = false;
+							printf("First create the parent direcotry\n");
+							return found;
+						}
+
+				for(m=0;m<=inodeCounter;m++){
+					if(strcmp(LastDirPath,entryName[m]) == 0){
+							printf("File with name %s is already present\n",LastDirPath);
+							found = false;
+							return found;
+					}
+				}
+
+				
+				
+						if(m > inodeCounter ){
+							found = true;
+							return found;
+						}
+
+		
+			if(k > inodeCounter ){
+				found = true;
+				return found;
+			}
+
+		
+		}
+
+			return found;
+	}
+
+// check the absolute path of file in file system to see if it present or not
+	bool searchDirectory_abs_path_cpout(){
+		bool found = false;
+		
+		int i,j,k,m;
+		int count =0;
+		char *word_1 = word[1];
+		split_string_fSlash(word_1);
+		if(abs_path_dir == 1){
+			char *LastDirPath = word_slash[abs_path_dir-2];
+			for(k=0;k<=inodeCounter;k++){
+				if(strcmp(LastDirPath,entryName[k]) == 0){
+				//	printf("File with name %s is already present\n",LastDirPath);
+					found = true;
+					return found;
+				}
+			}
+		}
+
+		else{
+			
+			char *LastDirPath = word_slash[abs_path_dir-1];
+			for(j=1;j<abs_path_dir-1;j++){
+					
+				char *dirName = word_slash[j-1];
+					
+				for(i=0;i<=inodeCounter;i++){
+					if(strcmp(dirName,entryName[i]) == 0){
+							count = count + 1;
+							break;
+					}
+				}
+				if(count == abs_path_dir-2){
+							printf("Parent directories are present\n");
+							found = true;
+							break;
+					}
+			}
+				
+		          
+			
+						if(i > inodeCounter ){
+							found = false;
+							printf("File is not present in the given direcotry\n");
+							return found;
+						}
+
+				for(m=0;m<=inodeCounter;m++){
+					if(strcmp(LastDirPath,entryName[m]) == 0){
+							printf("File with name %s is found\n",LastDirPath);
+							found = true;
+							return found;
+					}
+				}
+
+				
+				
+						if(m > inodeCounter ){
+							found = false;
+							return found;
+						}
+
+		
+			if(k > inodeCounter ){
+				found = true;
+				return found;
+			}
+
+		
+		}
+
+			return found;
+	}
+	// copying small file when file size is less then 4 MB
+	void copySmallFile(void){
+		
+		
+		if(size < 512){
+			numOfBlocksNeeded ++;
+		}
+			
+		if(searchDirectory_abs_path_cpin()){				// check if path is correct
+		
+			inode InodeToAllocate;
+			unsigned short lsb;
+			char msb,dummy;
+			int FreeInode;
+		
+			char *buff = (char *)malloc(sizeof(char)*size);
+		
+			//splitting absolute path for the file
+			char *word_2_1 = word[2];
+			//:w!
+			//:w!split_string_fSlash(word_2_1);
+			char *fileName = word_slash[abs_path_dir-1];
+			
+			int fd_ext = open(word[1], O_RDONLY,0777);
+			
+			if(fd_ext > 0 ){
+				
+				int fd_int = open(fileName, O_RDONLY | O_WRONLY | O_CREAT,0777);
+					
+				read(fd_ext,buff,size);
+				InodeToAllocate.flags = (InodeToAllocate.flags | 0100000 );
+				//stroing size
+				lsb = (size & 0xffff);
+				msb = size >> 16;
+				printf("copying small file\n");
+				
+				InodeToAllocate.size1 = lsb;
+				InodeToAllocate.size0 = msb;
+				
+				int i;
+				for(i=0;i<numOfBlocksNeeded;i++){
+					InodeToAllocate.addr[i] = getNextFreeBlock();
+					
+				}
+
+				//filling 0 for remaining address	
+				for(i=numOfBlocksNeeded;i<8;i++){
+					InodeToAllocate.addr[i] = 0;
+				}
+				FreeInode = getNextFreeInode();
+				
+				//writing freeInode
+				lseek(fd,(1024 + (FreeInode*32)),0);
+				write(fd,&InodeToAllocate,32);
+				
+				//writing data
+				lseek(fd,(512*InodeToAllocate.addr[0]),0);
+				write(fd,buff,size);
+				write(fd_int,buff,size);
+				file_entry(fileName,FreeInode);
+				
+				free(buff);
+				printf("\nPlease type next command\n");
+			}else{
+				printf("external file does not exist\n");
+			}
+		}else{
+			printf("Directory does not exist\n");
+		}
+	}
+
+	// copying file if size is greater than 4 MB
+	void copyLargeFile(void){
+	
+			int NumOfAddr;
+			inode InodeToAllocate;
+			unsigned short lsb;
+			char msb,dummy;
+			int FreeInodeLF;
+			
+			
+			char *buff = (char *)malloc(sizeof(char)*size);
+	
+			
+			char *word_2_2 = word[2];
+		//	split_string_fSlash(word_2_2);
+			
+			int fd_ext = open(word[1], O_RDONLY,0777);
+			
+		if(searchDirectory_abs_path_cpin()){
+			
+			char *fileName = word_slash[abs_path_dir-1];
+			if(fd_ext > 0){
+				int fd_int = open(fileName, O_RDONLY | O_WRONLY | O_CREAT,0777);
+				
+
+				NumOfAddr = (numOfBlocksNeeded/256);
+				
+				if((numOfBlocksNeeded % 256) !=0){
+					NumOfAddr++;
+				}
+				if (NumOfAddr > 8){
+					printf("Exceeds file size limit\n");
+				}else{
+					InodeToAllocate.flags = (InodeToAllocate.flags | 0110000);
+					int i;
+					for(i=0;i<NumOfAddr;i++){
+						InodeToAllocate.addr[i]=getNextFreeBlock();
+					}
+					
+					for(i=NumOfAddr;i<8;i++){
+						InodeToAllocate.addr[i]=0;
+					}
+				      
+				        lsb = (size & 0xffff);
+				        dummy = (int)(size >> 16);
+				        if(size < 16777215){
+				        		msb = (unsigned int)(dummy);
+				        }
+				        else{
+				        		dummy = (int)(size >> 16);
+				  		msb = (unsigned int)(dummy);
+				  		InodeToAllocate.flags = (InodeToAllocate.flags | 0111000);
+				        }
+				      	
+					printf("copying large file\n");
+				      	InodeToAllocate.size1 = lsb;
+				        InodeToAllocate.size0 = msb;
+
+				        //writing Inodes
+				        FreeInodeLF = getNextFreeInode();
+				        
+					lseek(fd,1024 + (FreeInodeLF*32),0);
+				        write(fd,&InodeToAllocate,sizeof(inode));
+
+				        //writing single indirect blocks
+				        
+				        int blocksAllocated;
+				        unsigned short assignBlocks[256];
+
+					char zero[512] = {0};
+				        //write 256 addresss each of which will point to 512 bytes of blocks
+				        int j;
+				        
+				        for(i=0;i<NumOfAddr;i++){
+				  		for(j=0;(j<256) && (blocksAllocated<=numOfBlocksNeeded);j++){
+				  			assignBlocks[j] = getNextFreeBlock();
+							
+							//reading from external file and writing
+							lseek(fd,assignBlocks[j] * 512,0);
+							
+
+							lseek(fd_ext,blocksAllocated * 512,0);
+							read(fd_ext,buff,512);
+							write(fd,buff,512);
+							write(fd_int,buff,512);
+				  			blocksAllocated = blocksAllocated + 1;
+				  		}
+
+				  		//padding zeros in rest of blocks
+				  		for(;j<256;j++) {
+							assignBlocks[j] = 0;
+							lseek(fd,assignBlocks[j] * 512,0);
+							write(fd,&zero,sizeof(zero));
+						}
+				  		//writing assign blocks
+				  		lseek(fd,(InodeToAllocate.addr[i] * 512),0);
+				  		write(fd,&assignBlocks,512);
+				  		//writing double indirect block
+				  		int k,l;
+				  		unsigned short assignIndirectBlocks[256];
+				  		if(i=InodeToAllocate.addr[7]){
+				  			for(k=0;k<256;k++){
+				  				for(l=0;(l<256) && (blocksAllocated<=numOfBlocksNeeded);l++){
+				  					assignIndirectBlocks[l] = getNextFreeBlock();
+									
+									
+									lseek(fd,assignIndirectBlocks[l] * 512,0);
+									lseek(fd_ext,blocksAllocated * 512,0);
+									read(fd_ext,buff,512);
+									write(fd,buff,512);
+									write(fd_int,buff,512);
+				  					blocksAllocated = blocksAllocated + 1;
+
+				  				}
+				  				for(;l<256;l++){
+				  					assignIndirectBlocks[l] = 0;
+				  					lseek(fd,assignBlocks[k] * 512,0);
+				  					write(fd,&assignIndirectBlocks,512);
+
+				  				}
+				  			}
+				  		}
+				     	}
+				}
+				printf("\nplease enter next command\n");
+				file_entry(fileName,FreeInodeLF);
+			}else{
+				printf("External file does not exist\n");
+			 }
+		}else{
+			printf("Directory does not exist\n");
+		}
+	close(fd_ext);
+	free(buff);
+	}
+
+	// stroing directory entries 
+	void root(){
+		inode rootNode;
+		directory dirEntry;
+		
+		lseek(fd,1024,0);
+		read(fd,&rootNode,sizeof(inode));
+
+		int nodeAllocated=0;
+		int blocksNeeded;
+
+		blocksNeeded = inodeCounter/32;
+		if((inodeCounter % 32) !=0){
+			blocksNeeded++;
+		}
+
+		int i,j;
+		for(i=0;i<8;i++){
+			for(j=0;(j<32) && (nodeAllocated <= inodeCounter);j++){
+				rootNode.addr[j] = getNextFreeBlock();
+				nodeAllocated = nodeAllocated + 32;
+			}
+		}
+		nodeAllocated = 1;
+		
+		for(i=0;i<8;i++){
+			if(rootNode.addr[i] != 0){
+				lseek(fd,rootNode.addr[i] * 512,0);
+				int k;
+				for (k=0;(k<32) && (nodeAllocated <= inodeCounter);k++){
+					dirEntry.inodeNumber = inodeList[inodeCounter];
+					
+					strcpy(dirEntry.fileName,entryName[--inodeCounter]);
+					write(fd,&dirEntry,sizeof(directory));
+					nodeAllocated++;
+				}
+			}else break;
+		}
+
+	}//root ends
+
+	// copying files from file system to external file
+	bool V6_file_found(){
+		bool found = false;
+		char *efile = word[2];
+		
+
+		
+		if(searchDirectory_abs_path_cpout()){				// check if path is correct
+		//char *word_1_1 = word[1];
+		//split_string_fSlash(word_1_1);
+		
+			char *v6file = word_slash[abs_path_dir-1];
+			
+			int i;
+			int startAdr;
+
+			for(i=0;i<=inodeCounter;i++){
+				if(strcmp(v6file,entryName[i]) == 0) break;
+			}
+			if(i > inodeCounter ){
+				found = false;
+				return found;
+			}
+			inode v6node;
+			unsigned long long int filesize;
+
+			int v6inode = inodeList[i];
+
+			lseek(fd,1024 + (v6inode * 32),0);
+			read(fd,&v6node,sizeof(inode));
+			
+			// get filesize
+			if((v6node.flags & 0110000) == 0110000){
+				filesize = (((v6node.flags & 0001000) << 16) | v6node.size0 << 16 | v6node.size1);
+			}else if ((v6node.flags & 0100000) == 0100000){
+				filesize = (v6node.size0 << 16 | v6node.size1);
+			}else{
+				found = false;
+				return found;
+			}
+			int blocksReq = (filesize/512);
+			if(filesize % 512 !=0 ) blocksReq++;
+
+			if(filesize <= 4096){
+				startAdr = v6node.addr[0];
+			}else{
+				unsigned short one[256];
+				lseek(fd,v6node.addr[0] * 512 ,0);
+				read(fd,&one,512);
+				startAdr = one[0];
+				found = true;
+			}
+			int fd_ext = open(efile,O_RDONLY | O_WRONLY | O_CREAT,0777);
+			
+			int k;
+			for(k=0;k<blocksReq;k++){
+				lseek(fd,startAdr * 512,0);
+				char *buffer = (char*)malloc(512);
+				read(fd,buffer,512);
+				lseek(fd_ext,k * 512,0);
+				write(fd_ext,buffer,512);
+				startAdr--;
+				
+				free(buffer);
+			}
+		
+		close(fd_ext);
+		}
+		
+		found = true;
+		return found;
+	}
+
+	char* word_1(){
+
+		char *word_1_2 = word[1];
+		return word_1_2;
+	}
+	// search if directory is present or not
+	bool searchDirectory(){
+		bool found = false;
+		
+		int i,j,k,m;
+		int count = 0;
+		char *word_1 = word[1];
+		split_string_fSlash(word_1);
+		
+		if(abs_path_dir == 1){
+			char *LastDirPath = word_slash[abs_path_dir-1];
+			for(k=0;k<=inodeCounter;k++){
+				if(strcmp(LastDirPath,entryName[k]) == 0){
+					printf("Directory with name %s is already present\n",LastDirPath);
+					found = true;
+					return found;
+				}
+			}
+		}
+
+		else{
+			
+			char *LastDirPath = word_slash[abs_path_dir-1];
+			for(j=1;j<abs_path_dir;j++){
+					
+				char *dirName = word_slash[j-1];
+						
+				for(i=0;i<=inodeCounter;i++){
+					if(strcmp(dirName,entryName[i]) == 0){
+							count = count + 1;
+							break;
+					}
+				}
+				if(count == abs_path_dir - 1){
+							printf("Parent directories are present\n");
+							found = false;
+							break;
+					}
+			}
+				
+		          
+			
+						if(i > inodeCounter ){
+							found = true;
+							printf("First create the parent direcotry\n");
+							return found;
+						}
+
+				for(m=0;m<=inodeCounter;m++){
+					if(strcmp(LastDirPath,entryName[m]) == 0){
+							printf("Directory with name %s is already present\n",LastDirPath);
+							found = true;
+							return found;
+					}
+				}
+
+				
+				
+						if(m > inodeCounter ){
+							found = false;
+							return found;
+						}
+
+		
+			if(k > inodeCounter ){
+				found = false;
+				return found;
+			}
+
+		
+		}
+
+			return found;
+	}
+
+	// returns the inode number of direcotry
+	int directory_inode(char *dirName){
+		
+		int i;
+		int dirNode;
+		//char *dirName = word[1];
+		for(i=0;i<=inodeCounter;i++){
+			if(strcmp(dirName,entryName[i]) == 0){
+				return inodeList[i];
+				break;
+			}
+		}
+		if(i > inodeCounter ){
+			dirNode = getNextFreeInode();	
+			return dirNode;
+		}
+		return dirNode;
+	}
+	
+
+	// make the direcotry and direcotries in the absoulte path	
+	makeDir(){
+	
+	int i;
+	int parentNode;
+	int currentNode;
+	int dirNode;
+	//char *word_1_2 = word[1];
+	//split_string_fSlash(word_1());
+		if(abs_path_dir==1){
+			dirNode = getNextFreeInode();		
+			makeDir_1(dirNode,1,word_slash[0]);
+		}else{
+		
+			for(i=2;i<=abs_path_dir;i++){
+				parentNode = directory_inode(word_slash[i-2]);
+				currentNode = directory_inode(word_slash[i-1]);
+				makeDir_1(currentNode,parentNode,word_slash[i-1]);
+		         }			
+		     }   
+	}
+		
+
+	makeDir_1(int currentInode,int parentInode,char *dirName){
+					
+		inode allocateInode;
+		inode InodeParent;
+		
+		directory parentDir,currentDir,filler;
+
+		allocateInode.flags = (allocateInode.flags | 0140000);
+
+		file_entry(dirName,currentInode);
+
+		//writing inodes for directory
+		lseek(fd,1024 + currentInode*512,0);
+		write(fd,&allocateInode,sizeof(inode));
+		
+		//writing directories
+		lseek(fd, allocateInode.addr[0]*512,0);
+		////setting the ".." for parent directory
+		parentDir.inodeNumber = parentInode;
+		strcpy(parentDir.fileName,"..");
+		write(fd,&parentDir,sizeof(parentDir));
+		
+		//setting "." for current directory
+		currentDir.inodeNumber = currentInode;
+		strcpy(currentDir.fileName,".");
+		write(fd,&currentDir,sizeof(currentDir));
+		
+		lseek(fd,parentInode*512,0);
+		read(fd,&InodeParent,sizeof(inode));
+		//setting the directory name
+		lseek(fd,InodeParent.addr[0]*512 + 32,0);
+
+		currentDir.inodeNumber = currentInode;
+		strcpy(currentDir.fileName,dirName);
+		write(fd,&currentDir,sizeof(currentDir));
+		
+		//setting the remaining directory entries
+		int j;
+		for(j=4;j<=32;j++){
+			write(fd,&filler,sizeof(filler));
+		}
+	}
+		
+	
+	
+	allocateDirectory(){
+
+		inode allocateInode;
+		
+		split_string_fSlash(word[1]);
+		char *dirName = word_slash[0];
+		directory parentDir,currentDir,filler;
+		int dirNode;
+
+		allocateInode.flags = (allocateInode.flags | 0140000);
+
+		
+		dirNode = getNextFreeInode();
+		file_entry(word_slash[0],dirNode);
+
+		//writing inodes for directory
+		lseek(fd,1024 + dirNode*512,0);
+		write(fd,&allocateInode,sizeof(inode));
+		
+		//writing directories
+		lseek(fd,allocateInode.addr[0] * 512,0);
+			
+		////setting the ".." for parent directory
+		parentDir.inodeNumber = 1;
+		strcpy(parentDir.fileName,"..");
+		write(fd,&parentDir,sizeof(parentDir));
+		
+	//	//setting "." for current directory
+		currentDir.inodeNumber = dirNode;
+		strcpy(currentDir.fileName,".");
+		write(fd,&currentDir,sizeof(currentDir));
+		
+		//setting the directory name
+		
+		lseek(fd, 1024 + ((getInodesBlocks() * 512)+32), 0);
+		currentDir.inodeNumber = dirNode;
+		strcpy(currentDir.fileName,dirName);
+		write(fd,&currentDir,sizeof(currentDir));
+		
+		//setting the remaining directory entries
+		int j;
+		for(j=4;j<=32;j++){
+			write(fd,&filler,sizeof(filler));
+		}
+	}
+
+	const int n=14;
+	void remove_element_char(char array[][n], int index, int array_length){
+	int i;
+		for(i = index; i <= array_length - 1; i++) array[i][n] = array[i + 1][n];
+	}
+
+	void remove_element_int(int *array, int index, int array_length){
+	int i;
+		for(i = index; i <= array_length - 1; i++) array[i] = array[i + 1];
+	}
+
+
+	// removing files from file system
+	bool remove_file_found(){
+		bool found = false;
+
+		//	split_string_fSlash(word[1]);
+		if(searchDirectory_abs_path_cpout()){
+			char *fileName = word_slash[abs_path_dir-1];
+			int i;
+			for(i=0;i<=inodeCounter;i++){
+				if(strcmp(fileName,entryName[i])==0) {
+				found = true;
+					break;
+				}	
+			}
+
+			if(i> inodeCounter){
+				found = false;
+			return found;
+			}
+			
+			//get inode for the file to be removed
+			int fileNode = inodeList[i];
+
+			
+			inode fileInode;
+
+			lseek(fd,fileNode * 512,0);
+			//read(fd,&fileInode,sizeof(inode));
+				
+			char zero[32];
+			write(fd,&zero,32);	
+			remove_element_char(entryName,i,inodeCounter);
+			remove_element_int(inodeList,i,inodeCounter);
+			inodeCounter--;
+		}
+			return found;
+            } 
+
+int main ( int argc , char *argv[] )
+	{
+	g_argv = argv[1];
+	sup result;
+	
+	init_fd();
+	inode rootNode = {0,0,0,0,0,0,{0},{0},{0}};;
+	directory rootDirectory = {0,{0}};
+	directory filler = {0,{0}};
+
+		
+	char *command_name = malloc(max_size);
+	char *token;
+	printf("Please initialize the file system\n");
+	scanf("%[^\n]%*c",command_name);                                         // To take input string with space
+	split_string(command_name);           
+
+	/* case functions for all commands*/
+	do{
+		
+	int function;
+	if(strcmp(word[0],"initfs") == 0){
+		function = 1;
+	}else if (strcmp(word[0],"cpin") == 0){
+		function = 2;
+	}else if (strcmp(word[0],"q") == 0){
+		function =6;
+	}else if (strcmp(word[0],"cpout") == 0){
+		function = 3;
+	}else if (strcmp(word[0],"mkdir") == 0){
+		function = 4;
+	}else if (strcmp(word[0],"rm") == 0){
+		function = 5;
+	}else if (strcmp(word[0],"Return") == 0){
+		function = 7;
+	}else{
+		function = 8;
+	}
+		switch ( function ){
+		
+		case 1:
+			TotalBlocks = atoi(word[1]);
+			TotalInodes = atoi(word[2]);
+			super_block.fsize = getNumOfBlocks();
+			super_block.isize = getInodesBlocks();
+			super_block.nfree = 100;
+			super_block.ninode = getNumOfInodes();
+			int i;
+			for (i =0; i<100;i++){
+				super_block.free[i]= getFreeBlocksIndex() + i;
+		       		}
+	
+			lseek(fd,512,0);
+			write(fd, &super_block, sizeof(super_block));
+
+			//setting up root node
+
+			rootNode.flags = 0140000;
+			rootNode.addr[0] = (2 + getInodesBlocks())*512;
+			
+			lseek(fd,1024,0);
+			write(fd, &rootNode, 32);
+		
+			//inodes blockss
+			int j;
+			
+			for(j=1;j<getNumOfInodes();j++){
+				lseek(fd, 1024 + j * 32, 0);
+				write(fd, &node, sizeof(node));
+				}
+
+			//writing root directory
+			//Initializes the state of the directory. Called only once by initfs method
+			strcpy(entryName[inodeCounter],argv[1]);
+			inodeList[inodeCounter]=1;
+			inodeCounter++;
+			
+			strcpy(entryName[inodeCounter],argv[1]);
+			inodeList[inodeCounter]=1;
+			inodeCounter++;
+			
+			//root directory
+			rootDirectory.inodeNumber = 1;
+			strcpy(rootDirectory.fileName,".");
+			
+			lseek(fd, 1024 + (getInodesBlocks() * 512), 0);
+			write(fd, &rootDirectory, 16);
+
+			rootDirectory.inodeNumber = 1;
+			strcpy(rootDirectory.fileName,"..");
+			
+			lseek(fd, 1024 + ((getInodesBlocks() * 512)+16), 0);
+			write(fd, &rootDirectory, 16);
+
+			int k;
+			for(k=3;k<=32;k++){
+				lseek(fd, 1024 + (getInodesBlocks() * 512) + (k-1)*16, 0);
+				write(fd,&filler,16);
+				}
+			//writing free data blocks
+
+			char buffer[512] = {0};
+			char *headBuffer;
+			int l;
+			unsigned short freeHeadChain;
+			if((getNumOfBlocks() - getFreeBlocksIndex()) < 100){
+				for(l = getFreeBlocksIndex(); l <= getNumOfBlocks(); l++){
+					lseek(fd,l*512,0);
+					write(fd,&buffer,512);
+					}
+			}
+			else{
+				for(l = getFreeBlocksIndex(); l <= getNumOfBlocks(); l++){
+					if((l % 100 == getFreeBlocksIndex()) && ((getNumOfBlocks() - l)) >= 100){
+						freeHeadChain = l+100;
+						
+						lseek(fd, (l * 512), 0);
+						write(fd, &freeHeadChain,2);
+						char headBuffer[510];
+						lseek(fd, (l * 512)+2, 0);
+						write(fd, &headBuffer, 510);
+						}
+					else{
+						lseek(fd,l*512,0);
+						write(fd,&buffer,512);
+					}
+
+				}		
+			}
+
+			printf("Initalizing ......\n\n");
+			printf("File system is initialized\n\n");
+			printf("Please type commands to perform operation\n");
+		break;
+		
+		
+		case 2:{	
+					struct stat st;
+					stat(word[1],&st);
+					size = st.st_size;
+					
+					numOfBlocksNeeded = (size/512);
+					if((size % 512) !=0){
+						numOfBlocksNeeded++;
+					}
+
+					if (size <= 4096){
+						copySmallFile();
+						}
+					else{
+						copyLargeFile();
+					}
+				
+	      		 break;
+			 }
+		
+		case 3:			
+					if(V6_file_found()){
+						printf("copying file contents from v6 to external\n");
+						printf("please enter next command\n");
+					}else{
+						printf("file not found\n");
+						printf("\nplease enter next command\n");
+					}
+			break;
+		
+		case 4:
+					
+					if(searchDirectory()){
+						printf(".\n");
+					}else{
+						makeDir();
+						printf("New Direcotry is allocated in file system\n");
+						printf("\nPlease enter next command\n");
+					}
+			break;
+		
+		case 5:
+					if(remove_file_found()){
+						printf("removing file\n");
+						printf("\nPlease enter next command\n");
+					}else{
+						printf("file not found\n");
+						printf("\nPlease enter next command\n");
+					}
+			break;
+
+
+		case 6:{
+					root();
+					printf("\n Saving file and Quitting\n");
+					exit(1);
+			}
+
+		case 7:{
+					exit(1);
+			}
+		case 8:{
+					printf("invalid command\n");
+					printf("please enter valid command\n");
+			}
+				
+	    }//switch case ends
+		
+		scanf("%[^\n]%*c",command_name);                                         // To take input string with space
+		split_string(command_name);           
+	}while(1);
+	free(command_name);
+	}
+
