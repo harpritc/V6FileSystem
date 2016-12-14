@@ -1,4 +1,4 @@
-# V6FileSystem
+# UNIX V6FileSystem
 
 Objective 
 To design and develop a program called fsaccess which will allow a Unix user access to the file system of a foreign operating system, the modified Unix Version 6 or mV6.
